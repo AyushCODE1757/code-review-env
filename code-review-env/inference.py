@@ -12,6 +12,9 @@ It:
 import os
 import argparse
 import random
+import json
+import re
+import ast
 from openai import OpenAI  # or swap with any LLM client
 
 from env import CodeReviewEnv
@@ -26,37 +29,30 @@ SYSTEM_PROMPT = """\
 You are an expert code reviewer. Your job is to carefully read the provided code
 and identify bugs, logical errors, or performance issues.
 
-For each response, output ONE action in the following structured format:
-
-ACTION: <identify_bug | comment | approve | request_changes>
-LINE: <line number, if applicable>
-BUG_DESCRIPTION: <short description of the bug>
-SUGGESTED_FIX: <suggested fix or improvement>
-COMMENT: <any additional comment>
+For each response, output ONE action in the following structured JSON format:
+{
+  "action_type": "flag_bug",
+  "description": "<short description of the bug>",
+  "line": <line number>
+}
 
 Rules:
-- Use ACTION: identify_bug when you find a specific bug.
-- Use ACTION: approve only when you are confident the code is correct.
-- Use ACTION: request_changes when you want changes but haven't identified specifics.
-- Use ACTION: comment for non-bug observations.
+- Use "action_type": "flag_bug" when you find a specific bug.
+- Use "action_type": "approve" only when you are confident the code is correct.
+- Use "action_type": "request_changes" when you want changes but haven't identified specifics.
+- Use "action_type": "comment" for non-bug observations.
 - Be concise and precise.
 """
 
 
-def build_user_message(obs) -> str:
+def build_user_message(state: dict) -> str:
     """Format the current observation into an LLM user message."""
-    return f"""\
-Task: {obs.task_description}
-Language: {obs.language}
-Step: {obs.step}
-
-Code:
-{obs.code_snippet}
-
-Bugs identified so far: {obs.bugs_found if obs.bugs_found else "None"}
-
-What is your next review action?
-"""
+    observation = {
+        "code": state["Code"],
+        "steps_remaining": state["max_no_of_steps"] - state["number_of_steps"],
+        "found_bugs": state["found_bugs"]
+    }
+    return json.dumps(observation, indent=2)
 
 
 def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
@@ -70,17 +66,34 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     env = CodeReviewEnv(task)
+    
+    state = {
+        "Code": task.get("code", ""),
+        "bug": [
+            {
+                "line": task.get("line"),
+                "type": task.get("type"),
+                "description": task.get("description")
+            }
+        ] if "type" in task else task.get("bugs", []),
+        "found_bugs": [],
+        "number_of_steps": 0,
+        "max_no_of_steps": 5,
+        "done": False
+    }
+    env.MAX_STEPS = state["max_no_of_steps"]
     grader = Grader(max_steps=env.MAX_STEPS)
 
     obs = env.reset()
+    state["Code"] = obs.code_snippet
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     false_positives = 0
     final_action = "request_changes"
-    step = 0
 
-    while not obs.done:
-        user_msg = build_user_message(obs)
+    while not state["done"]:
+        user_msg = build_user_message(state)
         messages.append({"role": "user", "content": user_msg})
 
         # ── LLM call ───────────────────────────────────────────────────────────
@@ -93,11 +106,27 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
         messages.append({"role": "assistant", "content": raw_output})
 
         if verbose:
-            print(f"\n[Step {step + 1}] LLM Output:\n{raw_output}\n{'─'*60}")
+            print(f"\n[Step {state['number_of_steps'] + 1}] LLM Output:\n{raw_output}\n{'─'*60}")
 
         # ── Parse action ───────────────────────────────────────────────────────
-        parsed = parse_llm_action(raw_output)
-        action_type = parsed.get("action_type", "comment")
+        try:
+            json_str = raw_output
+            match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw_output, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            # Remove comments starting with #
+            json_str = re.sub(r'#.*', '', json_str)
+            try:
+                parsed = json.loads(json_str)
+            except json.JSONDecodeError:
+                parsed = ast.literal_eval(json_str)
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except Exception:
+            parsed = parse_llm_action(raw_output)
+
+        action_type_raw = parsed.get("action_type", parsed.get("ACTION", "comment"))
+        action_type = "identify_bug" if action_type_raw == "flag_bug" else action_type_raw
 
         # Validate action type
         valid_types = {t.value for t in ActionType}
@@ -106,9 +135,9 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
 
         action = Action(
             action_type=action_type,
-            line_number=parsed.get("line_number"),
+            line_number=parsed.get("line"),
             comment=parsed.get("comment"),
-            bug_description=parsed.get("bug_description"),
+            bug_description=parsed.get("description"),
             suggested_fix=parsed.get("suggested_fix"),
         )
 
@@ -118,18 +147,20 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
 
         # ── Step environment ───────────────────────────────────────────────────
         obs = env.step(action)
+        
+        state["number_of_steps"] += 1
+        state["found_bugs"] = obs.bugs_found
+        state["done"] = obs.done
 
         if action_type in ("approve", "request_changes"):
             final_action = action_type
 
-        step += 1
-
     # ── Grade ──────────────────────────────────────────────────────────────────
     result = grader.grade(
         task=task,
-        bugs_found=obs.bugs_found,
+        bugs_found=state["found_bugs"],
         false_positives=false_positives,
-        steps_taken=step,
+        steps_taken=state["number_of_steps"],
         total_reward=env.total_reward,
         final_action=final_action,
     )
@@ -170,7 +201,7 @@ def main():
     idx = args.task_index if args.task_index is not None else random.randint(0, len(tasks) - 1)
     task = tasks[idx]
 
-    print(f"Running task: {task['id']} ({task['difficulty']})")
+    print(f"Running task: {task.get('taskid', task.get('id', 'unknown'))} ({task['difficulty']})")
     print(f"Model: {args.model}\n{'='*60}")
 
     run_episode(task=task, model=args.model, verbose=not args.quiet)

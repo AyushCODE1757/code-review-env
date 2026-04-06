@@ -95,7 +95,7 @@ class Grader:
         )
 
         return GradeResult(
-            task_id=task.get("id", "unknown"),
+            task_id=task.get("taskid", task.get("id", "unknown")),
             difficulty=task.get("difficulty", "unknown"),
             total_reward=round(total_reward, 4),
             bugs_found=bugs_correctly_found,

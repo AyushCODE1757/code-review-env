@@ -25,9 +25,15 @@ class CodeReviewEnv:
                 - 'language': str — Programming language (default 'python')
         """
         self.task = task
-        self.code: str = task["code"]
-        self.description: str = task["description"]
-        self.ground_truth_bugs: List[Dict[str, Any]] = task.get("bugs", [])
+        self.code: str = task.get("code", "")
+        self.description: str = "Review the provided code and identify bugs."
+        self.ground_truth_bugs: List[Dict[str, Any]] = [
+            {
+                "line": task.get("line"),
+                "type": task.get("type"),
+                "description": task.get("description")
+            }
+        ] if "type" in task else task.get("bugs", [])
         self.language: str = task.get("language", "python")
 
         self.reward_calc = RewardCalculator(self.ground_truth_bugs)
