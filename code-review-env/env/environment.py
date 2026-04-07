@@ -1,111 +1,126 @@
 from typing import Optional, Dict, Any, List
-from .models import Action, Observation
-from .rewards import RewardCalculator
+from .models import Action, Observation, Bug  
+from tasks import get_task
 from .utils import number_lines, truncate_code
 
 
 class CodeReviewEnv:
-    """
-    Core reinforcement learning environment for LLM-based code review.
 
-    The agent receives code and iteratively takes review actions (comment,
-    identify_bug, approve, request_changes) until it finalizes a review or
-    reaches the maximum number of steps.
-    """
+    _done: bool = False
+    total_reward: float = 0.0
 
-    MAX_STEPS = 10
+    def reset(self, difficulty="easy") -> Observation:
+        self.difficulty = difficulty
 
-    def __init__(self, task: Dict[str, Any]):
-        """
-        Args:
-            task: A task dictionary with keys:
-                - 'code': str — The code to review
-                - 'description': str — Task description / instructions
-                - 'bugs': List[Dict] — Ground truth bugs
-                - 'language': str — Programming language (default 'python')
-        """
-        self.task = task
-        self.code: str = task.get("code", "")
-        self.description: str = "Review the provided code and identify bugs."
-        self.ground_truth_bugs: List[Dict[str, Any]] = [
-            {
-                "line": task.get("line"),
-                "type": task.get("type"),
-                "description": task.get("description")
-            }
-        ] if "type" in task else task.get("bugs", [])
-        self.language: str = task.get("language", "python")
+        if difficulty == "easy":
+            self.MAX_STEPS = 5
+        elif difficulty == "medium":
+            self.MAX_STEPS = 10
+        elif difficulty == "hard":
+            self.MAX_STEPS = 15
 
-        self.reward_calc = RewardCalculator(self.ground_truth_bugs)
-        self._step = 0
-        self._done = False
-        self._bugs_found: List[str] = []
-        self._total_reward: float = 0.0
+        task = get_task(difficulty)
 
-    def reset(self) -> Observation:
-        """Reset the environment to its initial state and return the first observation."""
-        self._step = 0
-        self._done = False
-        self._bugs_found = []
-        self._total_reward = 0.0
-        self.reward_calc.reset()
-        return self._build_observation(reward=0.0)
+        self.state = {
+            "code": task["code"],
+            "true_bugs": task["bugs"],  # FIXED
+            "found_bugs": [],
+            "applied_fixes": [],
+            "steps_taken": 0,           # FIXED
+            "max_steps": self.MAX_STEPS # FIXED
+        }
 
-    def step(self, action: Action) -> Observation:
-        """
-        Apply an action to the environment.
+        return self._build_observation()
 
-        Args:
-            action: The Action taken by the agent.
+    def step(self, action_dict):
+        action = Action(**action_dict)
 
-        Returns:
-            Observation: The next observation.
-        """
-        if self._done:
-            raise RuntimeError("Episode is done. Call reset() to start a new episode.")
+        reward = 0.0
+        done = False
+        info = {}
 
-        reward = self.reward_calc.calculate(action, self._step)
+        if action.type == "flag_bug":
+            reward, info = self._handle_flag_bug(action)
 
-        # Track identified bugs for observation
-        if action.action_type == "identify_bug" and action.bug_description:
-            self._bugs_found.append(action.bug_description)
+        elif action.type == "suggest_fix":
+            reward, info = self._handle_suggest_fix(action)
 
-        self._step += 1
-        self._total_reward += reward
+        elif action.type == "approve":
+            reward, done, info = self._handle_approve()
 
-        # Terminal condition: agent approves/requests_changes OR max steps reached
-        terminal_actions = {"approve", "request_changes"}
-        if action.action_type in terminal_actions or self._step >= self.MAX_STEPS:
-            reward += self.reward_calc.final_penalty()
-            self._total_reward += self.reward_calc.final_penalty()
-            self._done = True
+        else:
+            reward = -1.0
+            info["error"] = "Invalid action type"
 
-        obs = self._build_observation(reward=reward)
-        return obs
+        reward -= 0.05
 
-    def _build_observation(self, reward: float) -> Observation:
-        """Construct an Observation from current environment state."""
-        code_display = truncate_code(number_lines(self.code))
+        self.state["steps_taken"] += 1  # FIXED
+
+        if self.state["steps_taken"] >= self.state["max_steps"]:  # FIXED
+            done = True
+
+        self.total_reward += reward      # FIXED
+        self._done = done               # FIXED
+
+        return self._build_observation(), reward, done, info
+
+    def _build_observation(self) -> Observation:
+        fixed_lines = [f["line"] for f in self.state["applied_fixes"]]  # FIXED
+
         return Observation(
-            code_snippet=code_display,
-            task_description=self.description,
-            language=self.language,
-            line_count=len(self.code.splitlines()),
-            bugs_found=list(self._bugs_found),
-            step=self._step,
-            done=self._done,
-            reward=round(reward, 4),
-            info={
-                "total_reward": round(self._total_reward, 4),
-                "max_steps": self.MAX_STEPS,
-                "ground_truth_bug_count": len(self.ground_truth_bugs),
-            },
+            code=self.state["code"],
+            found_bugs=self.state["found_bugs"],
+            fixed_lines=fixed_lines,  # FIXED
+            steps_remaining=self.state["max_steps"] - self.state["steps_taken"],  # FIXED
         )
+
+    def _handle_flag_bug(self, action):
+        line = action.line
+
+        true_bug = next((b for b in self.state["true_bugs"] if b["line"] == line), None)
+
+        if true_bug and line not in [b["line"] for b in self.state["found_bugs"]]:
+            self.state["found_bugs"].append({
+                "line": line,
+                "description": action.description
+            })
+            return 1.0, {"message": "Correct bug found"}
+
+        if true_bug:
+            return -0.2, {"message": "Duplicate bug"}
+
+        return -0.5, {"message": "No bug on this line"}
+
+    def _handle_suggest_fix(self, action):
+        line = action.line
+
+        true_bug = next((b for b in self.state["true_bugs"] if b["line"] == line), None)
+
+        if not true_bug:
+            return -0.5, {"message": "No bug to fix"}
+
+        if line not in [b["line"] for b in self.state["found_bugs"]]:
+            return -0.5, {"message": "Fix before flagging"}
+
+        if line in [f["line"] for f in self.state["applied_fixes"]]:  # FIXED
+            return -0.2, {"message": "Duplicate fix"}
+
+        self.state["applied_fixes"].append({   # FIXED
+            "line": line,
+            "fix": action.description
+        })
+
+        return 0.5, {"message": "Fix accepted"}
+
+    def _handle_approve(self):
+        total = len(self.state["true_bugs"])
+        found = len(self.state["found_bugs"])
+
+        if found == total:
+            return 1.0, True, {"message": "All bugs found. Approved."}
+        else:
+            return -1.0, True, {"message": "Approved too early"}
 
     @property
     def is_done(self) -> bool:
         return self._done
-
-    @property
-    def total_reward(self) -> float:
-        return self._total_reward
