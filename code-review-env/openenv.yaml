@@ -7,22 +7,17 @@ description: >
 
 environment:
   entry_point: env.environment:CodeReviewEnv
-  max_steps: 10
-  action_space:
-    - identify_bug
-    - comment
-    - approve
-    - request_changes
-  observation_fields:
-    - code_snippet
-    - task_description
-    - language
-    - line_count
-    - bugs_found
-    - step
-    - done
-    - reward
-    - info
+
+action_space:
+  - flag_bug
+  - suggest_fix
+  - approve
+
+observation_fields:
+  - code
+  - found_bugs
+  - fixed_lines
+  - steps_remaining
 
 tasks:
   easy:
@@ -51,10 +46,10 @@ grader:
   module: grader.grader
   export: Grader
   weights:
-    bug_detection: 0.5
+    bug_detection: 0.4
     false_positive: 0.2
     efficiency: 0.2
-    decision_quality: 0.1
+    decision_quality: 0.2
 
 inference:
   script: inference.py

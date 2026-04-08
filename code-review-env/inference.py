@@ -52,16 +52,21 @@ Allowed actions:
 {
   "type": "approve"
 }
+
 Before choosing an action, carefully inspect the code line by line.
 
 Focus only on real syntax or logical errors.
 
 For each step:
-1. Look at the code.
-2. Identify if a specific line has a clear bug.
+1. Look at the FULL code (not just one line).
+2. Identify if a specific line has a clear, verifiable bug.
 3. If no clear bug exists, stop and approve.
 
-Do NOT assume patterns like "missing parenthesis" unless clearly visible in the code.
+IMPORTANT:
+
+- Pay special attention to control flow and ordering of conditions.
+- Check if any condition is unreachable due to earlier conditions.
+- Verify that loops, conditions, and logic produce the intended behavior.
 
 STRICT RULES:
 
@@ -70,26 +75,26 @@ STRICT RULES:
 - Do NOT repeat the same bug or same line.
 - If a bug is already in "found_bugs", do NOT flag it again.
 - Each line should be flagged at most once.
-- If you cannot clearly point to the exact syntax issue in the code, DO NOT flag a bug.
--After suggesting a fix, check if all bugs are resolved.
+- If you cannot clearly point to the exact issue in the code, DO NOT flag a bug.
+- Do NOT suggest a fix unless the bug is confirmed from the code.
+- Do NOT invent issues based on common patterns.
 
--If no clear bugs remain, immediately return:
+- After suggesting a fix, check if all bugs are resolved.
+
+- If no clear bugs remain, immediately return:
 {
   "type": "approve"
 }
 
-Do NOT continue searching for more issues once a valid bug has been found and fixed.
+- Do NOT continue searching for more issues once a valid bug has been found and fixed.
 
 - Prefer accuracy over quantity.
 - It is better to miss a bug than to invent one.
-- Do NOT assume additional issues unless clearly visible in the code.
-- If you are not really a bug exists, DO NOT flag it.
-- Output ONLY JSON. No explanation.
-- Before identifying a bug, carefully analyze the full code.
 
-- Do NOT guess based on a single line.
 - Ensure the issue is logically consistent with the program behavior.
--
+- Do NOT guess based on patterns — verify using the actual code.
+
+- Output ONLY JSON. No explanation.
 """
  
 
@@ -103,13 +108,14 @@ def build_user_message(state: dict) -> str:
     return json.dumps(observation, indent=2)
 
 
-def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
+def run_episode(task: dict, model: str = None, verbose: bool = True):
+    model = model or os.getenv("MODEL_NAME") or "fallback"
+
     client = OpenAI(
-    base_url=os.getenv("API_BASE_URL"),
-    api_key=os.getenv("HF_TOKEN"),
+        base_url=os.getenv("API_BASE_URL"),
+        api_key=os.getenv("HF_TOKEN"),
     )
 
-    # FIXED: correct env init
     env = CodeReviewEnv()
     obs = env.reset(task=task)
 
@@ -119,11 +125,9 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
 
     done = False
     final_action = "approve"
-
     step_count = 0
 
     while not done:
-        # use env observation directly
         obs_dict = obs.model_dump()
         obs_dict["code"] = number_lines(obs_dict["code"])
         user_msg = json.dumps(obs_dict, indent=2)
@@ -131,30 +135,21 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
         messages.append({"role": "user", "content": user_msg})
 
         # LLM call
-        model=os.getenv("MODEL_NAME"),
         if os.getenv("HF_TOKEN"):
-            # --- Normal LLM path ---
             response = client.chat.completions.create(
-                model=os.getenv("MODEL_NAME"),
+                model=model,
                 messages=messages,
                 temperature=0.2,
             )
             raw_output = response.choices[0].message.content
-
         else:
-            # --- Fallback (no API) ---
-            print("⚠️ No API key found. Using fallback agent.")
-
-            # Simple heuristic: always flag first line
             raw_output = json.dumps({
                 "type": "flag_bug",
                 "line": 1,
-                "description": "Fallback guess (no LLM)"
+                "description": "Fallback guess"
             })
-        messages.append({"role": "assistant", "content": raw_output})
 
-        if verbose:
-            print(f"\n[Step {step_count + 1}] LLM Output:\n{raw_output}\n{'─'*60}")
+        messages.append({"role": "assistant", "content": raw_output})
 
         # Parse action
         try:
@@ -176,32 +171,36 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
         except Exception:
             parsed = parse_llm_action(raw_output)
 
-        # correct key
-        action_type = parsed.get("type", "comment")
-
-        #  send dict, not Action object
         action = {
-            "type": action_type,
+            "type": parsed.get("type", "comment"),
             "line": parsed.get("line"),
             "description": parsed.get("description"),
             "fix": parsed.get("fix"),
         }
 
-        # correct step usage
+        # Step env
         obs, reward, done, info = env.step(action)
-        # If all bugs found → force approve
+
+        # ✅ PRINT STEP (ONLY ONCE, AFTER STEP)
+        if verbose:
+            print("\n[STEP]")
+            print(f"step={step_count + 1}")
+            print(f"action={action}")
+            print(f"reward={reward}")
+            print(f"done={done}")
+
+        # Force approve if all bugs found
         true_bug_lines = {int(b["line"]) for b in env.state["true_bugs"]}
         found_bug_lines = {int(b["line"]) for b in env.state["found_bugs"]}
 
-        if true_bug_lines == found_bug_lines and self.state["steps_taken"] >= 2:
+        if true_bug_lines == found_bug_lines and step_count >= 2:
             done = True
             final_action = "approve"
+
         step_count += 1
         if not done:
             final_action = action["type"]
-    print("FOUND BUGS:", env.state["found_bugs"])
 
-    # correct grader call
     result = grader.grade(
         task=task,
         bugs_found=env.state["found_bugs"],
@@ -211,8 +210,14 @@ def run_episode(task: dict, model: str = "gpt-4o", verbose: bool = True):
     )
 
     if verbose:
-        print("\n--- GRADE RESULT ---\n")
-        print(result)
+        print("\n[END]")
+        print(f"score={result.score}")
+        print(f"total_reward={result.total_reward}")
+        print(f"bugs_found={result.bugs_found}")
+        print(f"bugs_missed={result.bugs_missed}")
+        print(f"false_positives={result.false_positives}")
+        print(f"steps_taken={result.steps_taken}")
+        print(f"approved={result.approved}")
 
     return result
 
@@ -233,7 +238,7 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o",
+        default=None,
         help="OpenAI model to use",
     )
     parser.add_argument(
@@ -252,10 +257,12 @@ def main():
     idx = args.task_index if args.task_index is not None else random.randint(0, len(tasks) - 1)
     task = tasks[idx]
 
-    print(f"Running task: {task.get('taskid', task.get('id', 'unknown'))} ({task['difficulty']})")
-    print(f"Model: {args.model}\n{'='*60}")
 
-    run_episode(task=task, model=args.model, verbose=not args.quiet)
+    model = args.model or os.getenv("MODEL_NAME")
+    print("[START]")
+    print(f"task_id={task.get('taskid', task.get('id', 'unknown'))}")
+    print(f"difficulty={task['difficulty']}")
+    run_episode(task=task, model=model, verbose=not args.quiet)
 
 
 if __name__ == "__main__":

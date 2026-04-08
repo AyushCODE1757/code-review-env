@@ -34,9 +34,7 @@ class CodeReviewEnv:
             }]
 
         # --- DEBUG ---
-        print("\n--- TASK DEBUG ---")
-        print(task)
-        print("------------------\n")
+       
 
         # --- STATE INIT ---
         self.state = {
@@ -54,7 +52,7 @@ class CodeReviewEnv:
             "max_steps": self.MAX_STEPS
         }
 
-        print("TRUE BUGS:", self.state["true_bugs"])
+  
 
         return self._build_observation()
 
