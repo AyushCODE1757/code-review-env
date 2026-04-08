@@ -9,9 +9,16 @@ class CodeReviewEnv:
     _done: bool = False
     total_reward: float = 0.0
 
-    def reset(self, difficulty="easy") -> Observation:
-        self.difficulty = difficulty
+    def reset(self, difficulty="easy", task=None):
+    # --- SINGLE SOURCE OF TRUTH ---
+        if task is not None:
+            self.task = task
+        else:
+            self.task = get_task(difficulty)
 
+        task = self.task  # always use this
+
+        # --- MAX STEPS ---
         if difficulty == "easy":
             self.MAX_STEPS = 5
         elif difficulty == "medium":
@@ -19,16 +26,35 @@ class CodeReviewEnv:
         elif difficulty == "hard":
             self.MAX_STEPS = 15
 
-        task = get_task(difficulty)
+        # --- NORMALIZE TASK FORMAT ---
+        if "bugs" not in task:
+            task["bugs"] = [{
+                "line": task.get("line"),
+                "description": task.get("description", "")
+            }]
 
+        # --- DEBUG ---
+        print("\n--- TASK DEBUG ---")
+        print(task)
+        print("------------------\n")
+
+        # --- STATE INIT ---
         self.state = {
             "code": task["code"],
-            "true_bugs": task["bugs"],  # FIXED
+            "true_bugs": [
+                {
+                    "line": int(b["line"]),  # ensure consistent type
+                    "description": b.get("description", "")
+                }
+                for b in task["bugs"]
+            ],
             "found_bugs": [],
             "applied_fixes": [],
-            "steps_taken": 0,           # FIXED
-            "max_steps": self.MAX_STEPS # FIXED
+            "steps_taken": 0,
+            "max_steps": self.MAX_STEPS
         }
+
+        print("TRUE BUGS:", self.state["true_bugs"])
 
         return self._build_observation()
 
@@ -41,6 +67,8 @@ class CodeReviewEnv:
 
         if action.type == "flag_bug":
             reward, info = self._handle_flag_bug(action)
+            if len(self.state["found_bugs"]) == 1:
+                reward +=0.3  # bonus for first bug found
 
         elif action.type == "suggest_fix":
             reward, info = self._handle_suggest_fix(action)
@@ -77,9 +105,9 @@ class CodeReviewEnv:
     def _handle_flag_bug(self, action):
         line = action.line
 
-        true_bug = next((b for b in self.state["true_bugs"] if b["line"] == line), None)
+        true_bug = next((b for b in self.state["true_bugs"] if int(b["line"]) == line), None)
 
-        if true_bug and line not in [b["line"] for b in self.state["found_bugs"]]:
+        if true_bug and line not in [int(b["line"]) for b in self.state["found_bugs"]]:
             self.state["found_bugs"].append({
                 "line": line,
                 "description": action.description
@@ -87,23 +115,23 @@ class CodeReviewEnv:
             return 1.0, {"message": "Correct bug found"}
 
         if true_bug:
-            return -0.2, {"message": "Duplicate bug"}
+            return -0.3, {"message": "Duplicate bug"}
 
-        return -0.5, {"message": "No bug on this line"}
+        return -0.7, {"message": "No bug on this line"}
 
     def _handle_suggest_fix(self, action):
         line = action.line
 
-        true_bug = next((b for b in self.state["true_bugs"] if b["line"] == line), None)
+        true_bug = next((b for b in self.state["true_bugs"] if int(b["line"]) == line), None)
 
         if not true_bug:
-            return -0.5, {"message": "No bug to fix"}
+            return -0.7, {"message": "No bug to fix"}
 
-        if line not in [b["line"] for b in self.state["found_bugs"]]:
-            return -0.5, {"message": "Fix before flagging"}
+        if line not in [int(b["line"]) for b in self.state["found_bugs"]]:
+            return -0.7, {"message": "Fix before flagging"}
 
         if line in [f["line"] for f in self.state["applied_fixes"]]:  # FIXED
-            return -0.2, {"message": "Duplicate fix"}
+            return -0.3, {"message": "Duplicate fix"}
 
         self.state["applied_fixes"].append({   # FIXED
             "line": line,

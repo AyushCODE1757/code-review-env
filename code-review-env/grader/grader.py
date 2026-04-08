@@ -49,11 +49,10 @@ class Grader:
         efficiency_score = max(0.0, 1.0 - (steps_taken / self.max_steps))
         # Decision logic
         if total_bugs == 0:
-            decision_score = 1.0 if final_action == "approve" else 0.0
+            decision_score = 1.0 if final_action == "approve" else 0.5
         else:
-        # bugs exist
             if correct == total_bugs:
-                decision_score = 1.0 if final_action == "approve" else 0.0
+                decision_score = 1.0 if final_action == "approve" else 0.5
             else:
                 decision_score = 0.0
         #  Final score 
@@ -67,14 +66,14 @@ class Grader:
         normalized_score = round(composite * 100, 2)
 
         return GradeResult(
-            task_id=task.get("task_id", "unknown"),
+            task_id=task.get("task_id", task.get("taskid", "unknown")),
             difficulty=task.get("difficulty", "unknown"),
             total_reward=round(total_reward, 4),
             bugs_found=correct,
             bugs_missed=missed,
             false_positives=false_positives,
             steps_taken=steps_taken,
-            approved=(final_action == "approve"),
+            approved = (final_action == "approve" and correct == total_bugs),
             score=normalized_score,
             feedback=[]
         )
