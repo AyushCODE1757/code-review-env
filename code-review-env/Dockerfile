@@ -11,8 +11,8 @@ COPY requirements.txt .
 
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install -r requirements.txt && \
-    /opt/venv/bin/pip install fastapi uvicorn
+    /opt/venv/bin/pip install -r requirements.txt
+
 # ── Runtime ─────────────────────────────────────────────
 FROM python:3.11-slim
 
@@ -29,5 +29,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV API_BASE_URL=""
 ENV HF_TOKEN=""
 ENV MODEL_NAME=""
+
+EXPOSE 7860
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
