@@ -28,8 +28,6 @@ nltk==3.9.2
 # AI / LLM
 # =========================
 openai
-transformers
-torch
 
 # =========================
 # Testing
